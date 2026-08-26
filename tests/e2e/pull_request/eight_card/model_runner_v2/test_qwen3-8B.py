@@ -29,6 +29,7 @@ from tests.e2e.pull_request.one_card.model_runner_v2.utils import (
 MODEL = "/weight/Qwen3-8B"
 EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
 
+
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="dense",
@@ -98,7 +99,7 @@ def test_qwen3_eagle3_dsd() -> None:
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
-    
+
     acceptance_per_pos = calculate_acceptance_per_pos(
         metrics,
         num_speculative_tokens,
