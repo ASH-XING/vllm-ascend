@@ -36,7 +36,7 @@ EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
     feature="eagle3",
     parallel="TP",
     deploy="pd_mix",
-    quantization="None",
+    quantization="",
     hardware="A3",
     graph_mode="eager",
 )
