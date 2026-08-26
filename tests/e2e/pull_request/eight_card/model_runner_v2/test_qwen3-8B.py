@@ -36,9 +36,8 @@ EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
     arch="dense",
     feature="eagle3",
     parallel="TP",
-    deploy="decode",
+    deploy="pd_mix",
     hardware="A3",
-    quantization="None",
     graph_mode="eager",
 )
 @patch.dict(
