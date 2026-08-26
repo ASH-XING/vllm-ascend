@@ -44,13 +44,14 @@ EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
 @patch.dict(
     os.environ,
     {
+        "HCCL_BUFFSIZE": "1024",
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "OMP_NUM_THREADS": "10",
         "TASK_QUEUE_ENABLE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "LCCL_DETERMINISTI": "1",
+        "LCCL_DETERMINISTIC": "1",
         "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
         "HCCL_DETERMINISTIC": "true",
         "CLOSE_MATMUL_K_SHIFT": "1",
