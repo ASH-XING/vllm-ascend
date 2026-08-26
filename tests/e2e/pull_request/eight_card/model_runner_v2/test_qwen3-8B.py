@@ -26,8 +26,6 @@ from tests.e2e.pull_request.one_card.model_runner_v2.utils import (
     calculate_acceptance_per_pos,
 )
 
-os.environ["HCCL_BUFFSIZE"] = "1024"
-
 MODEL = "/weight/Qwen3-8B"
 EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
 
@@ -37,6 +35,7 @@ EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
     feature="eagle3",
     parallel="TP",
     deploy="pd_mix",
+    quantization=None,
     hardware="A3",
     graph_mode="eager",
 )
