@@ -345,6 +345,26 @@ class NPUModelRunner(GPUModelRunner):
             valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+            # lmhead TP: idle DP ranks never call sample(), so they must join
+            # the target LM-head collectives here at the group-agreed capacity
+            # (V1: ``need_dummy_logits``). The parent's dummy forward already
+            # ran the draft LM-head collectives exactly once, so only the
+            # target side is joined -- joining the draft again would
+            # double-count it and hang HCCL. The capacity is the dynamic
+            # DP-synced value captured by the parent forward (cached on the
+            # lm_head), falling back to the static group-agreed bound.
+            if self.execute_model_state is None:
+                raise RuntimeError(
+                    "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
+                )
+            capacity = self._lmhead_tp_dynamic_capacity()
+            dummy_indices = torch.zeros(
+                capacity,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
@@ -675,6 +695,20 @@ class NPUModelRunner(GPUModelRunner):
         """
         return self.max_num_reqs * self.decode_query_len
 
+    def _lmhead_tp_dynamic_capacity(self) -> int:
+        """Group-agreed lmhead-TP capacity for this step.
+
+        Reads the dynamic value captured by the lm-head forward from the
+        DP-synced ``num_tokens_across_dp`` (cached on the head), falling back
+        to the static group-agreed bound when no forward ran or the head does
+        not carry a cached value.
+        """
+        lm_head = getattr(self.model, "lm_head", None)
+        dynamic = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+        if isinstance(dynamic, int):
+            return dynamic
+        return self._lmhead_tp_max_num_logits()
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
 
@@ -743,7 +777,14 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        """Pure passthrough to the parent dummy run for lmhead TP.
+
+        The target LM-head join happens in ``execute_model`` after the parent
+        returns, and the parent's dummy propose already runs the draft LM-head
+        collectives exactly once, so no join happens here (joining again would
+        double-count the collectives and hang HCCL). EPLB is stepped after the
+        LM-head join via ``step_eplb_after``.
+        """
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -766,13 +807,6 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
         return hidden_states, sample_hidden_states
 
     def postprocess_sampled(
