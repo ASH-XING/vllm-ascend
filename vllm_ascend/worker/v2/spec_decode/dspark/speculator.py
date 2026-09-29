@@ -39,15 +39,22 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    # DSpark samples via compute_draft_logits (bypasses sample_draft), so the
+    # mixin sample_draft alignment is not used; instead the draft LMHead is
+    # given a static lmhead_tp_capacity (load_draft_model below) and the
+    # ops-layer _get_logits_lmheadtp pads/trims the draft-head collectives.
+    _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
         self._init_dcp()
@@ -78,6 +85,20 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
+
+        # lmhead TP: the DSpark draft LMHead emits num_speculative_steps rows per
+        # request and is vocab-sharded over the lmhead-TP group; every rank must
+        # feed the same row count into the draft-head collectives. Publish the
+        # static group-agreed capacity (max_num_reqs * num_speculative_steps,
+        # identical on every rank from global config) on the draft head; the
+        # ops-layer _get_logits_lmheadtp pads/trims around the collectives.
+        from vllm_ascend.utils import lmhead_tp_max_num_logits
+
+        draft_head = getattr(model, "lm_head", None)
+        if draft_head is not None:
+            draft_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(
+                self.max_num_reqs, self.num_speculative_steps
+            )
 
         return model
 

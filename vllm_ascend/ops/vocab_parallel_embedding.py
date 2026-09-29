@@ -445,6 +445,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        lmhead_tp_capacity: int | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -458,6 +459,11 @@ class AscendParallelLMHead(ParallelLMHead):
             disable_tp=disable_tp,
         )
         self.quant_config = quant_config
+        # Static lmhead-TP row capacity for this head: every rank of the
+        # lmhead-TP group must feed the collectives the same row count, so
+        # heads that emit a fixed number of rows per request (e.g. the DSpark
+        # draft LMHead, num_speculative_steps rows/req) pad up to this bound.
+        self.lmhead_tp_capacity = lmhead_tp_capacity
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
             set_weight_attrs(
@@ -574,12 +580,28 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
+        capacity = getattr(lm_head, "lmhead_tp_capacity", None)
+        num_logits = hidden_states.shape[0]
+        if capacity is not None:
+            if num_logits > capacity:
+                raise ValueError(
+                    f"lmhead TP rows ({num_logits}) exceed the group-agreed capacity "
+                    f"({capacity}); the capacity formula no longer matches "
+                    "upstream logits production."
+                )
+            if num_logits < capacity:
+                hidden_states = torch.nn.functional.pad(
+                    hidden_states, (0, 0, 0, capacity - num_logits)
+                )
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        if capacity is not None:
+            # Remove the group-agreed padding rows.
+            logits = logits[:num_logits]
 
         # Remove paddings in vocab (if any)
         if logits is not None:
