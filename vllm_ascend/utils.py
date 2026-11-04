@@ -1043,6 +1043,19 @@ def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch
     return torch.nn.functional.pad(rows, padding)
 
 
+def lmhead_tp_cap_log(tag: str, **fields: object) -> None:
+    """One-line lmhead-TP capacity instrumentation (capacity-trace branch only).
+
+    Emits a greppable ``LMHEAD_TP_CAP|<tag>|k=v|...`` record so concurrency
+    tests can trace, per step, every dynamic/static capacity: where the value
+    came from and how it was computed. Field values must be already
+    materialized Python scalars (ints/strs) — never device tensors — so the
+    log itself adds no NPU synchronization on top of the publish path.
+    """
+    payload = "|".join(f"{k}={v}" for k, v in fields.items())
+    logger.info("LMHEAD_TP_CAP|%s|%s", tag, payload)
+
+
 def embedding_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 1
 

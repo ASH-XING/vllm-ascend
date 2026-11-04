@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_enable, lmhead_tp_max_num_logits
 
 
 class LmheadTPDraftSamplingMixin:
@@ -104,6 +104,15 @@ class LmheadTPDraftSamplingMixin:
                 "the vllm-ascend maintainers."
             )
         lm_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
+        lmhead_tp_cap_log(
+            "draft_static_inject",
+            family=type(self).__name__,
+            head=hex(id(lm_head)),
+            formula="max_num_reqs*(num_speculative_steps+1)",
+            max_num_reqs=self.max_num_reqs,
+            num_speculative_steps=self.num_speculative_steps,
+            static=lm_head.lmhead_tp_capacity,
+        )
 
     def _lmhead_tp_publish_draft_capacity(
         self, num_tokens_across_dp: torch.Tensor | None, tokens_per_req: int = 1
@@ -151,6 +160,16 @@ class LmheadTPDraftSamplingMixin:
             uniform_reqs = self._lmhead_tp_uniform_num_reqs
             if uniform_reqs is not None and uniform_reqs <= max_query_rows:
                 lm_head._lmhead_tp_dynamic_capacity = uniform_reqs * tokens_per_req
+                lmhead_tp_cap_log(
+                    "draft_dyn_publish",
+                    family=type(self).__name__,
+                    head=hex(id(lm_head)),
+                    source="stashed_dp_num_reqs*tokens_per_req",
+                    stashed_num_reqs=uniform_reqs,
+                    tokens_per_req=tokens_per_req,
+                    synced_max_query_rows=max_query_rows,
+                    dyn=lm_head._lmhead_tp_dynamic_capacity,
+                )
                 return
             if max_query_rows % tokens_per_req != 0:
                 raise ValueError(
@@ -159,8 +178,24 @@ class LmheadTPDraftSamplingMixin:
                     "DP-synced capacity would desync the draft-head collectives."
                 )
             lm_head._lmhead_tp_dynamic_capacity = max_query_rows
+            lmhead_tp_cap_log(
+                "draft_dyn_publish",
+                family=type(self).__name__,
+                head=hex(id(lm_head)),
+                source="dp_synced_max_query_rows",
+                synced_max_query_rows=max_query_rows,
+                tokens_per_req=tokens_per_req,
+                dyn=lm_head._lmhead_tp_dynamic_capacity,
+            )
         elif hasattr(lm_head, "_lmhead_tp_dynamic_capacity"):
             # No DP sync this round: drop the previous round's dynamic value
             # so the static lmhead_tp_capacity stays authoritative and a
             # stale capacity cannot be reused.
             del lm_head._lmhead_tp_dynamic_capacity
+            lmhead_tp_cap_log(
+                "draft_dyn_drop",
+                family=type(self).__name__,
+                head=hex(id(lm_head)),
+                reason="no_dp_sync_this_step",
+                static=getattr(lm_head, "lmhead_tp_capacity", None),
+            )

@@ -51,6 +51,7 @@ from vllm_ascend.utils import (
     embedding_tp_enable,
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
+    lmhead_tp_cap_log,
     lmhead_tp_enable,
 )
 
@@ -596,6 +597,20 @@ class AscendLogitsProcessor(LogitsProcessor):
         # on every rank of the DP group), else the static ``lmhead_tp_capacity``.
         capacity = self._get_lmhead_tp_capacity(lm_head)
         num_logits = hidden_states.shape[0]
+        if isinstance(getattr(lm_head, "_lmhead_tp_dynamic_capacity", None), int):
+            cap_source = "dynamic"
+        elif isinstance(getattr(lm_head, "lmhead_tp_capacity", None), int):
+            cap_source = "static"
+        else:
+            cap_source = "none"
+        lmhead_tp_cap_log(
+            "head_consume",
+            head=hex(id(lm_head)),
+            capacity=capacity,
+            source=cap_source,
+            rows=num_logits,
+            pad=None if capacity is None else capacity - num_logits,
+        )
         if capacity is not None:
             if num_logits > capacity:
                 raise ValueError(

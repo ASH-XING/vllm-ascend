@@ -25,7 +25,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,16 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
                 if id(head) in target_module_ids:
                     shared_head.head = copy.copy(head)
                     shared_head.head.lmhead_tp_capacity = static_capacity
+                    lmhead_tp_cap_log(
+                        "draft_static_inject",
+                        family=type(self).__name__,
+                        head=hex(id(shared_head.head)),
+                        formula="max_num_reqs*(num_speculative_steps+1)",
+                        max_num_reqs=self.max_num_reqs,
+                        num_speculative_steps=self.num_speculative_steps,
+                        static=static_capacity,
+                        note="decoupled_copy_of_shared_target_head",
+                    )
             # The loader also leaves a top-level lm_head alias pointing at
             # the target's head; decouple it so no future draft-side
             # head-level writer can poison the target's head object.
@@ -139,11 +149,26 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             max_reqs_across_dp = int(num_tokens_across_dp.max().item())
             num_mtp_layers = mtp_model.num_mtp_layers
             draft_capacity = max_reqs_across_dp * num_mtp_layers
+            lmhead_tp_cap_log(
+                "draft_dyn_publish",
+                family=type(self).__name__,
+                source="synced_max_reqs*num_mtp_layers",
+                synced_max_reqs=max_reqs_across_dp,
+                num_mtp_layers=num_mtp_layers,
+                dyn=draft_capacity,
+                heads=len(layers),
+            )
             for layer in layers.values():
                 layer.shared_head.head._lmhead_tp_dynamic_capacity = draft_capacity
         else:
             # No DP sync this round: drop the previous round's dynamic value so
             # the static lmhead_tp_capacity stays authoritative.
+            lmhead_tp_cap_log(
+                "draft_dyn_drop",
+                family=type(self).__name__,
+                reason="no_dp_sync_this_step",
+                heads=len(layers),
+            )
             for layer in layers.values():
                 if hasattr(layer.shared_head.head, "_lmhead_tp_dynamic_capacity"):
                     del layer.shared_head.head._lmhead_tp_dynamic_capacity
