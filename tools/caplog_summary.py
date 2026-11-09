@@ -8,6 +8,12 @@ DP-rank worker process. This tool collapses the interleaved wall of lines into:
 - a per-(rank, step) timeline for one rank (--rank), showing the full capacity
   chain of each engine step: target publish -> target consume -> draft stash ->
   draft rounds (publish + head consume);
+- a cross-rank group-uniformity audit (default): every rank's N-th publish or
+  consume belongs to the same all-rank collective, so the per-rank value
+  sequences must be identical element-wise — this is the "did every rank pad
+  to the same capacity" check, independent of the per-rank step counters;
+- a within-rank chain audit (default): consumes must match the published
+  capacity, rows must never exceed capacity, pad must equal capacity - rows;
 - aggregate summaries: capacity histograms per side, pad histograms, batch
   boundaries (target_reqs_change), phase marks, and the audit-guard counters
   (target_static_fallback / draft_dyn_drop / source=static hits).
@@ -228,6 +234,134 @@ def summary(records: list[tuple[str, str, dict[str, str]]]) -> None:
         print(f"  ... {len(reqs_changes) - len(shown)} more")
 
 
+def cross_rank_check(records: list[tuple[str, str, dict[str, str]]]) -> None:
+    """Group-uniformity audit: at every collective, did all ranks agree?
+
+    Step counters drift between DP ranks (idle vs active ranks tick
+    differently), so steps cannot align ranks. The collective call sequence
+    itself can: each rank's N-th publish/consume record belongs to the same
+    all-rank collective as every other rank's N-th record of that stream.
+    Every stream below is emitted by every rank exactly once per occurrence,
+    so the per-rank sequences must be identical element-wise — that is the
+    "all ranks padded to the same capacity" check.
+    """
+    streams: dict[str, dict[str, list[object]]] = {}
+
+    def add(stream: str, rank: str, value: object) -> None:
+        streams.setdefault(stream, {}).setdefault(rank, []).append(value)
+
+    for rank, tag, fields in records:
+        if tag == "target_dyn_publish":
+            add("target publish dyn", rank, int_or_none(fields.get("dyn")))
+        elif tag == "target_static_fallback":
+            add("target publish dyn", rank, int_or_none(fields.get("static")))
+        elif tag == "draft_dyn_publish":
+            add("draft publish dyn", rank, int_or_none(fields.get("dyn")))
+        elif tag == "draft_dyn_drop":
+            add("draft publish dyn", rank, f"DROP(static={fields.get('static')})")
+        elif tag == "head_consume":
+            side = fields.get("side", "?")
+            if side == "target":
+                add("target head rows", rank, int_or_none(fields.get("rows")))
+            else:
+                add(
+                    "draft head cap,rows",
+                    rank,
+                    (int_or_none(fields.get("capacity")), int_or_none(fields.get("rows"))),
+                )
+        elif tag == "target_consume_dummy_join":
+            add("target dummy_join cap", rank, int_or_none(fields.get("capacity")))
+
+    print("== cross-rank group-uniformity (per collective sequence) ==")
+    for name, per_rank in streams.items():
+        ranks = sorted(per_rank)
+        lens = {r: len(per_rank[r]) for r in ranks}
+        n = min(lens.values()) if lens else 0
+        mismatches = [
+            i
+            for i in range(n)
+            if len({per_rank[r][i] for r in ranks}) > 1
+        ]
+        counts_equal = len(set(lens.values())) == 1 if lens else True
+        verdict = "ALL RANKS MATCH"
+        if mismatches:
+            verdict = f"{len(mismatches)} MISMATCHED COLLECTIVES"
+        elif not counts_equal:
+            verdict = "RECORD-COUNT DRIFT BETWEEN RANKS"
+        print(f"  {name}: records/rank={sorted(lens.values())} -> {verdict}")
+        if mismatches:
+            for i in mismatches[:10]:
+                grid = " ".join(f"DP{r}={per_rank[r][i]}" for r in ranks)
+                print(f"    collective #{i + 1}: {grid}")
+        elif not counts_equal:
+            print(f"    per-rank counts: {lens} (a rank missed/added a call - investigate)")
+        if n:
+            sample = " ".join(f"DP{r}={per_rank[r][n - 1]}" for r in ranks)
+            print(f"    last collective sample: {sample}")
+
+
+def chain_check(records: list[tuple[str, str, dict[str, str]]]) -> None:
+    """Within-rank consume-vs-publish chain and pad arithmetic audit.
+
+    - target head rows must equal the last published target capacity
+      (the head is fed exactly the padded capacity rows);
+    - draft head capacity must equal the last draft publish (dyn, or the
+      static value after a drop);
+    - rows must never exceed capacity; pad must equal capacity - rows.
+    """
+    expected_target: dict[str, int | None] = {}
+    expected_draft: dict[str, int | None] = {}
+    bad_target: list[tuple[str, str, object, object]] = []
+    bad_draft: list[tuple[str, str, object, object]] = []
+    bad_rows: list[tuple[str, str, object, object]] = []
+
+    for rank, tag, fields in records:
+        if tag == "target_dyn_publish":
+            expected_target[rank] = int_or_none(fields.get("dyn"))
+        elif tag == "target_static_fallback":
+            expected_target[rank] = int_or_none(fields.get("static"))
+        elif tag == "target_consume_sample":
+            capacity = int_or_none(fields.get("capacity"))
+            if expected_target.get(rank) is not None and capacity != expected_target[rank]:
+                bad_target.append((rank, "sample cap", capacity, expected_target[rank]))
+        elif tag == "target_consume_dummy_join":
+            capacity = int_or_none(fields.get("capacity"))
+            if expected_target.get(rank) is not None and capacity != expected_target[rank]:
+                bad_target.append((rank, "dummy_join cap", capacity, expected_target[rank]))
+        elif tag == "draft_dyn_publish":
+            expected_draft[rank] = int_or_none(fields.get("dyn"))
+        elif tag == "draft_dyn_drop":
+            expected_draft[rank] = int_or_none(fields.get("static"))
+        elif tag == "head_consume":
+            side = fields.get("side", "?")
+            capacity = int_or_none(fields.get("capacity"))
+            rows = int_or_none(fields.get("rows"))
+            pad = int_or_none(fields.get("pad"))
+            if side == "target":
+                if expected_target.get(rank) is not None and rows != expected_target[rank]:
+                    bad_target.append((rank, "target head rows", rows, expected_target[rank]))
+            else:
+                if expected_draft.get(rank) is not None and capacity != expected_draft[rank]:
+                    bad_draft.append((rank, "draft head cap", capacity, expected_draft[rank]))
+            if capacity is not None and rows is not None and rows > capacity:
+                bad_rows.append((rank, "rows>capacity", rows, capacity))
+            if capacity is not None and rows is not None and pad is not None and pad != capacity - rows:
+                bad_rows.append((rank, "pad!=cap-rows", pad, capacity - rows))
+
+    print("== consume-vs-publish chain (within rank) ==")
+    for name, issues in (
+        ("target head rows != published capacity", bad_target),
+        ("draft head cap != published capacity", bad_draft),
+        ("rows/pad arithmetic violations", bad_rows),
+    ):
+        if issues:
+            print(f"  {name}: {len(issues)} VIOLATIONS")
+            for rank, what, got, want in issues[:10]:
+                print(f"    rank {rank} {what}: got={got} expected={want}")
+        else:
+            print(f"  {name}: 0 (clean)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", help="serving log file")
@@ -240,6 +374,10 @@ def main() -> None:
         sys.exit("no LMHEAD_TP_CAP records found in " + args.log)
 
     summary(records)
+    print()
+    cross_rank_check(records)
+    print()
+    chain_check(records)
     if args.rank is not None:
         lo = hi = None
         if args.steps:
