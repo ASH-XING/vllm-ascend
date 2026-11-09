@@ -111,9 +111,11 @@ from vllm_ascend.utils import (
     lmhead_tp_cap_log,
     lmhead_tp_cap_step,
     lmhead_tp_cap_step_bump,
+    lmhead_tp_dp_rank,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
+    lmhead_tp_stamp_publish,
     lmhead_tp_tag_role,
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
@@ -749,6 +751,7 @@ class NPUModelRunner(GPUModelRunner):
             lmhead_tp_cap_log(
                 "target_consume_dummy_join",
                 side="target",
+                rank=lmhead_tp_dp_rank(),
                 step=lmhead_tp_cap_step(),
                 capacity=capacity,
                 source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",
@@ -1229,6 +1232,7 @@ class NPUModelRunner(GPUModelRunner):
                 # new request wave (or a wave edge) started at this step.
                 lmhead_tp_cap_log(
                     "target_reqs_change",
+                    rank=lmhead_tp_dp_rank(),
                     step=step,
                     num_reqs=num_reqs,
                     prev=getattr(self, "_lmhead_tp_prev_sync_reqs", None),
@@ -1236,9 +1240,16 @@ class NPUModelRunner(GPUModelRunner):
                 self._lmhead_tp_prev_sync_reqs = num_reqs
             self._lmhead_tp_step_capacity_value = num_reqs * self.decode_query_len
             self._lmhead_tp_step_capacity_is_dynamic = True
+            lmhead_tp_stamp_publish(
+                target_lm_head,
+                source="dp_sync_state.num_reqs*decode_query_len",
+                publisher="model_runner._publish_lmhead_tp_step_capacity",
+                value=self._lmhead_tp_step_capacity_value,
+            )
             lmhead_tp_cap_log(
                 "target_dyn_publish",
                 side="target",
+                rank=lmhead_tp_dp_rank(),
                 step=step,
                 source="dp_sync_state.num_reqs*decode_query_len",
                 dp_sync_num_reqs=num_reqs,
@@ -1249,9 +1260,17 @@ class NPUModelRunner(GPUModelRunner):
             # No DP sync and no value published yet: use the static bound.
             self._lmhead_tp_step_capacity_value = self.max_num_reqs * self.decode_query_len
             self._lmhead_tp_step_capacity_is_dynamic = False
+            lmhead_tp_stamp_publish(
+                target_lm_head,
+                source="max_num_reqs*decode_query_len",
+                publisher="model_runner._publish_lmhead_tp_step_capacity",
+                value=self._lmhead_tp_step_capacity_value,
+                dynamic=False,
+            )
             lmhead_tp_cap_log(
                 "target_static_fallback",
                 side="target",
+                rank=lmhead_tp_dp_rank(),
                 step=step,
                 source="max_num_reqs*decode_query_len",
                 max_num_reqs=self.max_num_reqs,
@@ -1263,6 +1282,7 @@ class NPUModelRunner(GPUModelRunner):
             lmhead_tp_cap_log(
                 "target_dyn_keep",
                 side="target",
+                rank=lmhead_tp_dp_rank(),
                 step=step,
                 kept=self._lmhead_tp_step_capacity_value,
                 dynamic=getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False),
@@ -1284,6 +1304,7 @@ class NPUModelRunner(GPUModelRunner):
         lmhead_tp_cap_log(
             "target_consume_sample",
             side="target",
+            rank=lmhead_tp_dp_rank(),
             step=lmhead_tp_cap_step(),
             capacity=capacity,
             source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",

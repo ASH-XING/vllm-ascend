@@ -28,8 +28,10 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm_ascend.utils import (
     lmhead_tp_cap_log,
     lmhead_tp_cap_step,
+    lmhead_tp_dp_rank,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
+    lmhead_tp_stamp_publish,
     lmhead_tp_tag_role,
 )
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -159,6 +161,7 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             lmhead_tp_cap_log(
                 "draft_dyn_publish",
                 family=type(self).__name__,
+                rank=lmhead_tp_dp_rank(),
                 step=lmhead_tp_cap_step(),
                 source="synced_max_reqs*num_mtp_layers",
                 synced_max_reqs=max_reqs_across_dp,
@@ -169,12 +172,19 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             for layer in layers.values():
                 layer.shared_head.head._lmhead_tp_dynamic_capacity = draft_capacity
                 lmhead_tp_tag_role(layer.shared_head.head, f"draft-{type(self).__name__}")
+                lmhead_tp_stamp_publish(
+                    layer.shared_head.head,
+                    source="synced_max_reqs*num_mtp_layers",
+                    publisher="mtp speculator _run_model",
+                    value=draft_capacity,
+                )
         else:
             # No DP sync this round: drop the previous round's dynamic value so
             # the static lmhead_tp_capacity stays authoritative.
             lmhead_tp_cap_log(
                 "draft_dyn_drop",
                 family=type(self).__name__,
+                rank=lmhead_tp_dp_rank(),
                 step=lmhead_tp_cap_step(),
                 reason="no_dp_sync_this_step",
                 heads=len(layers),
@@ -182,4 +192,11 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             for layer in layers.values():
                 if hasattr(layer.shared_head.head, "_lmhead_tp_dynamic_capacity"):
                     del layer.shared_head.head._lmhead_tp_dynamic_capacity
+                    lmhead_tp_stamp_publish(
+                        layer.shared_head.head,
+                        source="static_after_dyn_drop",
+                        publisher="mtp speculator _run_model",
+                        value=getattr(layer.shared_head.head, "lmhead_tp_capacity", None),
+                        dynamic=False,
+                    )
         return hidden_states

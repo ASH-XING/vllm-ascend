@@ -51,8 +51,10 @@ from vllm_ascend.utils import (
     embedding_tp_enable,
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
+    lmhead_tp_cap_call_bump,
     lmhead_tp_cap_log,
     lmhead_tp_cap_step,
+    lmhead_tp_dp_rank,
     lmhead_tp_enable,
 )
 
@@ -606,13 +608,18 @@ class AscendLogitsProcessor(LogitsProcessor):
             cap_source = "none"
         lmhead_tp_cap_log(
             "head_consume",
-            head=hex(id(lm_head)),
-            side=getattr(lm_head, "_lmhead_tp_role", "untagged"),
+            rank=lmhead_tp_dp_rank(),
             step=lmhead_tp_cap_step(),
+            call=lmhead_tp_cap_call_bump(),
+            side=getattr(lm_head, "_lmhead_tp_role", "untagged"),
+            rows=num_logits,
+            dyn=getattr(lm_head, "_lmhead_tp_dynamic_capacity", None),
+            static=getattr(lm_head, "lmhead_tp_capacity", None),
+            info=getattr(lm_head, "_lmhead_tp_pub_info", "unpublished"),
             capacity=capacity,
             source=cap_source,
-            rows=num_logits,
             pad=None if capacity is None else capacity - num_logits,
+            head=hex(id(lm_head)),
         )
         if capacity is not None:
             if num_logits > capacity:

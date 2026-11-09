@@ -44,7 +44,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 from vllm_ascend.utils import (
     lmhead_tp_cap_log,
     lmhead_tp_cap_step,
+    lmhead_tp_dp_rank,
     lmhead_tp_enable,
+    lmhead_tp_stamp_publish,
     lmhead_tp_tag_role,
     vllm_version_is,
 )
@@ -521,10 +523,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_reqs_across_dp = max_query_rows // self.num_query_per_req
             self.model.lm_head._lmhead_tp_dynamic_capacity = max_reqs_across_dp * self.num_speculative_steps
             lmhead_tp_tag_role(self.model.lm_head, f"draft-{type(self).__name__}")
+            lmhead_tp_stamp_publish(
+                self.model.lm_head,
+                source="synced_max_query_rows//num_query_per_req*num_speculative_steps",
+                publisher="dspark speculator _lmhead_tp_publish_draft_capacity",
+                value=self.model.lm_head._lmhead_tp_dynamic_capacity,
+            )
             lmhead_tp_cap_log(
                 "draft_dyn_publish",
                 family=type(self).__name__,
                 head=hex(id(self.model.lm_head)),
+                rank=lmhead_tp_dp_rank(),
                 step=lmhead_tp_cap_step(),
                 source="synced_max_query_rows//num_query_per_req*num_speculative_steps",
                 synced_max_query_rows=max_query_rows,
@@ -538,10 +547,18 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # the static lmhead_tp_capacity stays authoritative and a stale
             # capacity cannot be reused.
             del self.model.lm_head._lmhead_tp_dynamic_capacity
+            lmhead_tp_stamp_publish(
+                self.model.lm_head,
+                source="static_after_dyn_drop",
+                publisher="dspark speculator _lmhead_tp_publish_draft_capacity",
+                value=getattr(self.model.lm_head, "lmhead_tp_capacity", None),
+                dynamic=False,
+            )
             lmhead_tp_cap_log(
                 "draft_dyn_drop",
                 family=type(self).__name__,
                 head=hex(id(self.model.lm_head)),
+                rank=lmhead_tp_dp_rank(),
                 step=lmhead_tp_cap_step(),
                 reason="no_dp_sync_this_step",
                 static=getattr(self.model.lm_head, "lmhead_tp_capacity", None),

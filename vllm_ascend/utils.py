@@ -1074,6 +1074,53 @@ def lmhead_tp_cap_step() -> int:
     return _LMHEAD_TP_CAP_STEP
 
 
+# Instrument-only head-consume call counter: disambiguates the several head
+# calls inside one engine step (3 draft rounds + 1 target).
+_LMHEAD_TP_CAP_CALL = 0
+
+
+def lmhead_tp_cap_call_bump() -> int:
+    global _LMHEAD_TP_CAP_CALL
+    _LMHEAD_TP_CAP_CALL += 1
+    return _LMHEAD_TP_CAP_CALL
+
+
+def lmhead_tp_dp_rank() -> object:
+    """Instrument-only: DP rank for log fields (-1 before/without init).
+
+    Local import: vllm_ascend.utils sits below the distributed stack, so a
+    module-level import would cycle. Called only on the logging path.
+    """
+    try:
+        from vllm.distributed import get_dp_group
+
+        return get_dp_group().rank_in_group
+    except Exception:
+        return -1
+
+
+def lmhead_tp_stamp_publish(
+    lm_head: Any,
+    source: str,
+    publisher: str,
+    value: int | None,
+    dynamic: bool = True,
+) -> None:
+    """Instrument-only: record on the head where its capacity was published.
+
+    ``head_consume`` prints this provenance so every consume line answers:
+    what was published (dyn/static), how it was computed, by which publisher,
+    and at which engine step. Kept as a separate ``_lmhead_tp_pub_info``
+    attribute so it can never affect capacity resolution.
+    """
+    if lm_head is None:
+        return
+    kind = "dyn" if dynamic else "static"
+    lm_head._lmhead_tp_pub_info = (
+        f"{kind}={value},src={source},by={publisher},pub_step={lmhead_tp_cap_step()}"
+    )
+
+
 def lmhead_tp_tag_role(lm_head: Any, role: str) -> None:
     """Instrument-only: label which side (draft family / target) owns a head.
 
