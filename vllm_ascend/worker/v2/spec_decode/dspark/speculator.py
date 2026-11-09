@@ -41,7 +41,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import (
+    lmhead_tp_cap_log,
+    lmhead_tp_cap_step,
+    lmhead_tp_enable,
+    lmhead_tp_tag_role,
+    vllm_version_is,
+)
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -514,10 +520,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 )
             max_reqs_across_dp = max_query_rows // self.num_query_per_req
             self.model.lm_head._lmhead_tp_dynamic_capacity = max_reqs_across_dp * self.num_speculative_steps
+            lmhead_tp_tag_role(self.model.lm_head, f"draft-{type(self).__name__}")
             lmhead_tp_cap_log(
                 "draft_dyn_publish",
                 family=type(self).__name__,
                 head=hex(id(self.model.lm_head)),
+                step=lmhead_tp_cap_step(),
                 source="synced_max_query_rows//num_query_per_req*num_speculative_steps",
                 synced_max_query_rows=max_query_rows,
                 num_query_per_req=self.num_query_per_req,
@@ -534,6 +542,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 "draft_dyn_drop",
                 family=type(self).__name__,
                 head=hex(id(self.model.lm_head)),
+                step=lmhead_tp_cap_step(),
                 reason="no_dp_sync_this_step",
                 static=getattr(self.model.lm_head, "lmhead_tp_capacity", None),
             )

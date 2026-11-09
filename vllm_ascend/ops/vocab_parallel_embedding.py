@@ -52,6 +52,7 @@ from vllm_ascend.utils import (
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
     lmhead_tp_cap_log,
+    lmhead_tp_cap_step,
     lmhead_tp_enable,
 )
 
@@ -606,6 +607,8 @@ class AscendLogitsProcessor(LogitsProcessor):
         lmhead_tp_cap_log(
             "head_consume",
             head=hex(id(lm_head)),
+            side=getattr(lm_head, "_lmhead_tp_role", "untagged"),
+            step=lmhead_tp_cap_step(),
             capacity=capacity,
             source=cap_source,
             rows=num_logits,

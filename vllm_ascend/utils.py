@@ -1056,6 +1056,36 @@ def lmhead_tp_cap_log(tag: str, **fields: object) -> None:
     logger.info("LMHEAD_TP_CAP|%s|%s", tag, payload)
 
 
+# Instrument-only engine-step counter (capacity-trace branch): the worker
+# bumps it once per execute_model (single writer; each DP rank is its own
+# process) so every LMHEAD_TP_CAP record — target publish/consume, draft
+# publish, head consume — can be correlated to one engine step and grouped
+# into request batches.
+_LMHEAD_TP_CAP_STEP = 0
+
+
+def lmhead_tp_cap_step_bump() -> int:
+    global _LMHEAD_TP_CAP_STEP
+    _LMHEAD_TP_CAP_STEP += 1
+    return _LMHEAD_TP_CAP_STEP
+
+
+def lmhead_tp_cap_step() -> int:
+    return _LMHEAD_TP_CAP_STEP
+
+
+def lmhead_tp_tag_role(lm_head: Any, role: str) -> None:
+    """Instrument-only: label which side (draft family / target) owns a head.
+
+    ``head_consume`` reads ``_lmhead_tp_role`` so draft and target head lines
+    are distinguishable by an explicit field instead of guessing from the
+    capacity source. Draft publishes retag every step (idempotent); the
+    target runner tags once, only if still untagged.
+    """
+    if lm_head is not None:
+        lm_head._lmhead_tp_role = role
+
+
 def embedding_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 1
 

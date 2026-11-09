@@ -6,7 +6,13 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import (
+    lmhead_tp_cap_log,
+    lmhead_tp_cap_step,
+    lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+    lmhead_tp_tag_role,
+)
 
 
 class LmheadTPDraftSamplingMixin:
@@ -104,6 +110,7 @@ class LmheadTPDraftSamplingMixin:
                 "the vllm-ascend maintainers."
             )
         lm_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
+        lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
         lmhead_tp_cap_log(
             "draft_static_inject",
             family=type(self).__name__,
@@ -160,10 +167,12 @@ class LmheadTPDraftSamplingMixin:
             uniform_reqs = self._lmhead_tp_uniform_num_reqs
             if uniform_reqs is not None and uniform_reqs <= max_query_rows:
                 lm_head._lmhead_tp_dynamic_capacity = uniform_reqs * tokens_per_req
+                lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
                 lmhead_tp_cap_log(
                     "draft_dyn_publish",
                     family=type(self).__name__,
                     head=hex(id(lm_head)),
+                    step=lmhead_tp_cap_step(),
                     source="stashed_dp_num_reqs*tokens_per_req",
                     stashed_num_reqs=uniform_reqs,
                     tokens_per_req=tokens_per_req,
@@ -178,10 +187,12 @@ class LmheadTPDraftSamplingMixin:
                     "DP-synced capacity would desync the draft-head collectives."
                 )
             lm_head._lmhead_tp_dynamic_capacity = max_query_rows
+            lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
             lmhead_tp_cap_log(
                 "draft_dyn_publish",
                 family=type(self).__name__,
                 head=hex(id(lm_head)),
+                step=lmhead_tp_cap_step(),
                 source="dp_synced_max_query_rows",
                 synced_max_query_rows=max_query_rows,
                 tokens_per_req=tokens_per_req,
@@ -196,6 +207,7 @@ class LmheadTPDraftSamplingMixin:
                 "draft_dyn_drop",
                 family=type(self).__name__,
                 head=hex(id(lm_head)),
+                step=lmhead_tp_cap_step(),
                 reason="no_dp_sync_this_step",
                 static=getattr(lm_head, "lmhead_tp_capacity", None),
             )

@@ -25,7 +25,13 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
-from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import (
+    lmhead_tp_cap_log,
+    lmhead_tp_cap_step,
+    lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+    lmhead_tp_tag_role,
+)
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 logger = logging.getLogger(__name__)
@@ -86,6 +92,7 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
                 if id(head) in target_module_ids:
                     shared_head.head = copy.copy(head)
                     shared_head.head.lmhead_tp_capacity = static_capacity
+                    lmhead_tp_tag_role(shared_head.head, f"draft-{type(self).__name__}")
                     lmhead_tp_cap_log(
                         "draft_static_inject",
                         family=type(self).__name__,
@@ -152,6 +159,7 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             lmhead_tp_cap_log(
                 "draft_dyn_publish",
                 family=type(self).__name__,
+                step=lmhead_tp_cap_step(),
                 source="synced_max_reqs*num_mtp_layers",
                 synced_max_reqs=max_reqs_across_dp,
                 num_mtp_layers=num_mtp_layers,
@@ -160,12 +168,14 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             )
             for layer in layers.values():
                 layer.shared_head.head._lmhead_tp_dynamic_capacity = draft_capacity
+                lmhead_tp_tag_role(layer.shared_head.head, f"draft-{type(self).__name__}")
         else:
             # No DP sync this round: drop the previous round's dynamic value so
             # the static lmhead_tp_capacity stays authoritative.
             lmhead_tp_cap_log(
                 "draft_dyn_drop",
                 family=type(self).__name__,
+                step=lmhead_tp_cap_step(),
                 reason="no_dp_sync_this_step",
                 heads=len(layers),
             )

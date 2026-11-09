@@ -109,9 +109,12 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_cap_log,
+    lmhead_tp_cap_step,
+    lmhead_tp_cap_step_bump,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
+    lmhead_tp_tag_role,
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
@@ -636,12 +639,16 @@ class NPUModelRunner(GPUModelRunner):
         # EncoderRunner uses vLLM's generic graph_capture(), whose communicator
         # type check expects the CUDA symbol. Temporarily bind that symbol to
         # NPUCommunicator, as is already done for decoder ACL graph capture.
+        lmhead_tp_cap_log("phase_mark", phase="capture_begin")
         with torch_cuda_wrapper(), communicator_switch():
             if "profile_only" not in inspect.signature(GPUModelRunner.capture_model).parameters:
                 if profile_only:
                     raise NotImplementedError("Graph memory profiling is unavailable in this vLLM version.")
-                return super().capture_model()
-            return super().capture_model(profile_only=profile_only)
+                captured = super().capture_model()
+            else:
+                captured = super().capture_model(profile_only=profile_only)
+            lmhead_tp_cap_log("phase_mark", phase="capture_done")
+            return captured
 
     # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
     # wave sync keeps running inside the inference-mode context.
@@ -711,6 +718,19 @@ class NPUModelRunner(GPUModelRunner):
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
+        if not getattr(self, "_lmhead_tp_seen_first_execute", False):
+            self._lmhead_tp_seen_first_execute = True
+            lmhead_tp_cap_log("phase_mark", phase="execute_model_first", is_profile=is_profile)
+        if is_profile and not getattr(self, "_lmhead_tp_seen_profile", False):
+            self._lmhead_tp_seen_profile = True
+            lmhead_tp_cap_log("phase_mark", phase="profile_run")
+        if (
+            not dummy_run
+            and not is_profile
+            and not getattr(self, "_lmhead_tp_seen_serving", False)
+        ):
+            self._lmhead_tp_seen_serving = True
+            lmhead_tp_cap_log("phase_mark", phase="serving_start")
         self._publish_lmhead_tp_step_capacity()
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle DP ranks never call sample(), so they must join
@@ -729,6 +749,7 @@ class NPUModelRunner(GPUModelRunner):
             lmhead_tp_cap_log(
                 "target_consume_dummy_join",
                 side="target",
+                step=lmhead_tp_cap_step(),
                 capacity=capacity,
                 source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",
                 reason="idle_dp_rank_joins_collective",
@@ -1190,17 +1211,35 @@ class NPUModelRunner(GPUModelRunner):
         """
         if not lmhead_tp_enable():
             return
+        step = lmhead_tp_cap_step_bump()
+        target_lm_head = getattr(self.model, "lm_head", None)
+        if target_lm_head is not None and getattr(target_lm_head, "_lmhead_tp_role", None) is None:
+            # Instrument-only: label the target head so head_consume lines
+            # separate it from draft heads (best-effort; a model without a
+            # top-level lm_head stays untagged).
+            lmhead_tp_tag_role(target_lm_head, "target")
         state = self.execute_model_state
         dp_sync = getattr(state, "dp_sync_state", None) if state is not None else None
         num_reqs = None
         if dp_sync is not None:
             num_reqs = getattr(dp_sync, "num_reqs", None)
         if num_reqs is not None:
+            if num_reqs != getattr(self, "_lmhead_tp_prev_sync_reqs", None):
+                # Batch boundary: the DP-synced request count changed, so a
+                # new request wave (or a wave edge) started at this step.
+                lmhead_tp_cap_log(
+                    "target_reqs_change",
+                    step=step,
+                    num_reqs=num_reqs,
+                    prev=getattr(self, "_lmhead_tp_prev_sync_reqs", None),
+                )
+                self._lmhead_tp_prev_sync_reqs = num_reqs
             self._lmhead_tp_step_capacity_value = num_reqs * self.decode_query_len
             self._lmhead_tp_step_capacity_is_dynamic = True
             lmhead_tp_cap_log(
                 "target_dyn_publish",
                 side="target",
+                step=step,
                 source="dp_sync_state.num_reqs*decode_query_len",
                 dp_sync_num_reqs=num_reqs,
                 decode_query_len=self.decode_query_len,
@@ -1213,6 +1252,7 @@ class NPUModelRunner(GPUModelRunner):
             lmhead_tp_cap_log(
                 "target_static_fallback",
                 side="target",
+                step=step,
                 source="max_num_reqs*decode_query_len",
                 max_num_reqs=self.max_num_reqs,
                 decode_query_len=self.decode_query_len,
@@ -1223,6 +1263,7 @@ class NPUModelRunner(GPUModelRunner):
             lmhead_tp_cap_log(
                 "target_dyn_keep",
                 side="target",
+                step=step,
                 kept=self._lmhead_tp_step_capacity_value,
                 dynamic=getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False),
                 reason="no_fresh_dp_sync",
@@ -1243,6 +1284,7 @@ class NPUModelRunner(GPUModelRunner):
         lmhead_tp_cap_log(
             "target_consume_sample",
             side="target",
+            step=lmhead_tp_cap_step(),
             capacity=capacity,
             source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",
             rows=num_logits,
