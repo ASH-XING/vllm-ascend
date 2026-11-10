@@ -56,6 +56,7 @@ from vllm_ascend.utils import (
     lmhead_tp_cap_step,
     lmhead_tp_dp_rank,
     lmhead_tp_enable,
+    lmhead_tp_head_idx,
 )
 
 
@@ -600,26 +601,34 @@ class AscendLogitsProcessor(LogitsProcessor):
         # on every rank of the DP group), else the static ``lmhead_tp_capacity``.
         capacity = self._get_lmhead_tp_capacity(lm_head)
         num_logits = hidden_states.shape[0]
-        if isinstance(getattr(lm_head, "_lmhead_tp_dynamic_capacity", None), int):
-            cap_source = "dynamic"
-        elif isinstance(getattr(lm_head, "lmhead_tp_capacity", None), int):
-            cap_source = "static"
+        role = getattr(lm_head, "_lmhead_tp_role", "untagged")
+        pub = getattr(lm_head, "_lmhead_tp_pub", None)
+        static_val = getattr(lm_head, "lmhead_tp_capacity", None)
+        if role == "target":
+            # Target rows are index/graph-padded by the runner, so the
+            # publish stamp IS the capacity that was fed.
+            dyn_v = pub[1] if pub is not None and pub[0] == "dyn" else None
+            cap_v = pub[1] if pub is not None else capacity
         else:
-            cap_source = "none"
+            dyn_v = getattr(lm_head, "_lmhead_tp_dynamic_capacity", None)
+            cap_v = capacity
+        src_v = pub[2] if pub is not None else "unpublished"
+        pub_step = pub[3] if pub is not None else None
+        pad_v = cap_v - num_logits if cap_v is not None else None
         lmhead_tp_cap_log(
-            "head_consume",
-            rank=lmhead_tp_dp_rank(),
+            "head",
+            r=lmhead_tp_dp_rank(),
+            head=f"#{lmhead_tp_head_idx(lm_head)}",
+            call=f"#{lmhead_tp_cap_call_bump()}",
             step=lmhead_tp_cap_step(),
-            call=lmhead_tp_cap_call_bump(),
-            side=getattr(lm_head, "_lmhead_tp_role", "untagged"),
+            side={"target": "t"}.get(role, "d" if role.startswith("draft") else "u"),
             rows=num_logits,
-            dyn=getattr(lm_head, "_lmhead_tp_dynamic_capacity", None),
-            static=getattr(lm_head, "lmhead_tp_capacity", None),
-            info=getattr(lm_head, "_lmhead_tp_pub_info", "unpublished"),
-            capacity=capacity,
-            source=cap_source,
-            pad=None if capacity is None else capacity - num_logits,
-            head=hex(id(lm_head)),
+            dyn="-" if dyn_v is None else dyn_v,
+            static="-" if static_val is None else static_val,
+            cap="-" if cap_v is None else cap_v,
+            pad="-" if pad_v is None else pad_v,
+            src=src_v,
+            pub="-" if pub_step is None else pub_step,
         )
         if capacity is not None:
             if num_logits > capacity:

@@ -1085,6 +1085,23 @@ def lmhead_tp_cap_call_bump() -> int:
     return _LMHEAD_TP_CAP_CALL
 
 
+# Instrument-only per-process head index: small stable numbers (head#0, #1...)
+# instead of memory addresses, so log lines stay short and comparable.
+_LMHEAD_TP_HEAD_SEQ = 0
+
+
+def lmhead_tp_head_idx(lm_head: Any) -> int:
+    global _LMHEAD_TP_HEAD_SEQ
+    if lm_head is None:
+        return -1
+    idx = getattr(lm_head, "_lmhead_tp_head_idx", None)
+    if idx is None:
+        idx = _LMHEAD_TP_HEAD_SEQ
+        _LMHEAD_TP_HEAD_SEQ += 1
+        lm_head._lmhead_tp_head_idx = idx
+    return idx
+
+
 def lmhead_tp_dp_rank() -> object:
     """Instrument-only: DP rank for log fields (-1 before/without init).
 
@@ -1102,22 +1119,25 @@ def lmhead_tp_dp_rank() -> object:
 def lmhead_tp_stamp_publish(
     lm_head: Any,
     source: str,
-    publisher: str,
+    detail: str,
     value: int | None,
     dynamic: bool = True,
 ) -> None:
-    """Instrument-only: record on the head where its capacity was published.
+    """Instrument-only: record on the head how its capacity was computed.
 
-    ``head_consume`` prints this provenance so every consume line answers:
-    what was published (dyn/static), how it was computed, by which publisher,
-    and at which engine step. Kept as a separate ``_lmhead_tp_pub_info``
-    attribute so it can never affect capacity resolution.
+    ``source`` is the formula name and ``detail`` the substituted operands
+    (e.g. ``"num_reqs*decode_query_len"`` / ``"3*8"``), so the head log line
+    shows both the formula and the numbers that went into it. Stored as a
+    ``(kind, value, src, step)`` tuple in ``_lmhead_tp_pub``; never consulted
+    by capacity resolution.
     """
     if lm_head is None:
         return
-    kind = "dyn" if dynamic else "static"
-    lm_head._lmhead_tp_pub_info = (
-        f"{kind}={value},src={source},by={publisher},pub_step={lmhead_tp_cap_step()}"
+    lm_head._lmhead_tp_pub = (
+        "dyn" if dynamic else "static",
+        value,
+        f"{source}={detail}",
+        lmhead_tp_cap_step(),
     )
 
 

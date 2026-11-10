@@ -26,9 +26,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.utils import (
-    lmhead_tp_cap_log,
-    lmhead_tp_cap_step,
-    lmhead_tp_dp_rank,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_stamp_publish,
@@ -95,15 +92,12 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
                     shared_head.head = copy.copy(head)
                     shared_head.head.lmhead_tp_capacity = static_capacity
                     lmhead_tp_tag_role(shared_head.head, f"draft-{type(self).__name__}")
-                    lmhead_tp_cap_log(
-                        "draft_static_inject",
-                        family=type(self).__name__,
-                        head=hex(id(shared_head.head)),
-                        formula="max_num_reqs*(num_speculative_steps+1)",
-                        max_num_reqs=self.max_num_reqs,
-                        num_speculative_steps=self.num_speculative_steps,
-                        static=static_capacity,
-                        note="decoupled_copy_of_shared_target_head",
+                    lmhead_tp_stamp_publish(
+                        shared_head.head,
+                        source="static_inject.max_num_seqs*(spec_steps+1)",
+                        detail=f"{self.max_num_reqs}*{self.num_speculative_steps + 1}",
+                        value=static_capacity,
+                        dynamic=False,
                     )
             # The loader also leaves a top-level lm_head alias pointing at
             # the target's head; decouple it so no future draft-side
@@ -158,44 +152,25 @@ class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
             max_reqs_across_dp = int(num_tokens_across_dp.max().item())
             num_mtp_layers = mtp_model.num_mtp_layers
             draft_capacity = max_reqs_across_dp * num_mtp_layers
-            lmhead_tp_cap_log(
-                "draft_dyn_publish",
-                family=type(self).__name__,
-                rank=lmhead_tp_dp_rank(),
-                step=lmhead_tp_cap_step(),
-                source="synced_max_reqs*num_mtp_layers",
-                synced_max_reqs=max_reqs_across_dp,
-                num_mtp_layers=num_mtp_layers,
-                dyn=draft_capacity,
-                heads=len(layers),
-            )
             for layer in layers.values():
                 layer.shared_head.head._lmhead_tp_dynamic_capacity = draft_capacity
                 lmhead_tp_tag_role(layer.shared_head.head, f"draft-{type(self).__name__}")
                 lmhead_tp_stamp_publish(
                     layer.shared_head.head,
-                    source="synced_max_reqs*num_mtp_layers",
-                    publisher="mtp speculator _run_model",
+                    source="synced_max_reqs*mtp_layers",
+                    detail=f"{max_reqs_across_dp}*{num_mtp_layers}",
                     value=draft_capacity,
                 )
         else:
             # No DP sync this round: drop the previous round's dynamic value so
             # the static lmhead_tp_capacity stays authoritative.
-            lmhead_tp_cap_log(
-                "draft_dyn_drop",
-                family=type(self).__name__,
-                rank=lmhead_tp_dp_rank(),
-                step=lmhead_tp_cap_step(),
-                reason="no_dp_sync_this_step",
-                heads=len(layers),
-            )
             for layer in layers.values():
                 if hasattr(layer.shared_head.head, "_lmhead_tp_dynamic_capacity"):
                     del layer.shared_head.head._lmhead_tp_dynamic_capacity
                     lmhead_tp_stamp_publish(
                         layer.shared_head.head,
-                        source="static_after_dyn_drop",
-                        publisher="mtp speculator _run_model",
+                        source="static_after_drop",
+                        detail=f"{getattr(layer.shared_head.head, 'lmhead_tp_capacity', None)}",
                         value=getattr(layer.shared_head.head, "lmhead_tp_capacity", None),
                         dynamic=False,
                     )

@@ -7,9 +7,6 @@ from typing import Any
 import torch
 
 from vllm_ascend.utils import (
-    lmhead_tp_cap_log,
-    lmhead_tp_cap_step,
-    lmhead_tp_dp_rank,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_stamp_publish,
@@ -113,14 +110,12 @@ class LmheadTPDraftSamplingMixin:
             )
         lm_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
         lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
-        lmhead_tp_cap_log(
-            "draft_static_inject",
-            family=type(self).__name__,
-            head=hex(id(lm_head)),
-            formula="max_num_reqs*(num_speculative_steps+1)",
-            max_num_reqs=self.max_num_reqs,
-            num_speculative_steps=self.num_speculative_steps,
-            static=lm_head.lmhead_tp_capacity,
+        lmhead_tp_stamp_publish(
+            lm_head,
+            source="static_inject.max_num_seqs*(spec_steps+1)",
+            detail=f"{self.max_num_reqs}*{self.num_speculative_steps + 1}",
+            value=lm_head.lmhead_tp_capacity,
+            dynamic=False,
         )
 
     def _lmhead_tp_publish_draft_capacity(
@@ -172,21 +167,9 @@ class LmheadTPDraftSamplingMixin:
                 lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
                 lmhead_tp_stamp_publish(
                     lm_head,
-                    source="stashed_dp_num_reqs*tokens_per_req",
-                    publisher="lmhead_tp_utils mixin _lmhead_tp_publish_draft_capacity",
+                    source="stashed_reqs*tokens_per_req",
+                    detail=f"{uniform_reqs}*{tokens_per_req}",
                     value=lm_head._lmhead_tp_dynamic_capacity,
-                )
-                lmhead_tp_cap_log(
-                    "draft_dyn_publish",
-                    family=type(self).__name__,
-                    head=hex(id(lm_head)),
-                    rank=lmhead_tp_dp_rank(),
-                    step=lmhead_tp_cap_step(),
-                    source="stashed_dp_num_reqs*tokens_per_req",
-                    stashed_num_reqs=uniform_reqs,
-                    tokens_per_req=tokens_per_req,
-                    synced_max_query_rows=max_query_rows,
-                    dyn=lm_head._lmhead_tp_dynamic_capacity,
                 )
                 return
             if max_query_rows % tokens_per_req != 0:
@@ -199,20 +182,9 @@ class LmheadTPDraftSamplingMixin:
             lmhead_tp_tag_role(lm_head, f"draft-{type(self).__name__}")
             lmhead_tp_stamp_publish(
                 lm_head,
-                source="dp_synced_max_query_rows",
-                publisher="lmhead_tp_utils mixin _lmhead_tp_publish_draft_capacity",
+                source="synced_max_rows",
+                detail=f"{max_query_rows}",
                 value=lm_head._lmhead_tp_dynamic_capacity,
-            )
-            lmhead_tp_cap_log(
-                "draft_dyn_publish",
-                family=type(self).__name__,
-                head=hex(id(lm_head)),
-                rank=lmhead_tp_dp_rank(),
-                step=lmhead_tp_cap_step(),
-                source="dp_synced_max_query_rows",
-                synced_max_query_rows=max_query_rows,
-                tokens_per_req=tokens_per_req,
-                dyn=lm_head._lmhead_tp_dynamic_capacity,
             )
         elif hasattr(lm_head, "_lmhead_tp_dynamic_capacity"):
             # No DP sync this round: drop the previous round's dynamic value
@@ -221,17 +193,8 @@ class LmheadTPDraftSamplingMixin:
             del lm_head._lmhead_tp_dynamic_capacity
             lmhead_tp_stamp_publish(
                 lm_head,
-                source="static_after_dyn_drop",
-                publisher="lmhead_tp_utils mixin _lmhead_tp_publish_draft_capacity",
+                source="static_after_drop",
+                detail=f"{getattr(lm_head, 'lmhead_tp_capacity', None)}",
                 value=getattr(lm_head, "lmhead_tp_capacity", None),
                 dynamic=False,
-            )
-            lmhead_tp_cap_log(
-                "draft_dyn_drop",
-                family=type(self).__name__,
-                head=hex(id(lm_head)),
-                rank=lmhead_tp_dp_rank(),
-                step=lmhead_tp_cap_step(),
-                reason="no_dp_sync_this_step",
-                static=getattr(lm_head, "lmhead_tp_capacity", None),
             )

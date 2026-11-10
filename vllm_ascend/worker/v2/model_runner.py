@@ -109,7 +109,6 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_cap_log,
-    lmhead_tp_cap_step,
     lmhead_tp_cap_step_bump,
     lmhead_tp_dp_rank,
     lmhead_tp_enable,
@@ -748,14 +747,12 @@ class NPUModelRunner(GPUModelRunner):
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
             capacity = self._lmhead_tp_step_capacity()
-            lmhead_tp_cap_log(
-                "target_consume_dummy_join",
-                side="target",
-                rank=lmhead_tp_dp_rank(),
-                step=lmhead_tp_cap_step(),
-                capacity=capacity,
-                source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",
-                reason="idle_dp_rank_joins_collective",
+            lmhead_tp_stamp_publish(
+                getattr(self.model, "lm_head", None),
+                source="dummy_join.capacity",
+                detail="kept_from_last_publish",
+                value=capacity,
+                dynamic=getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False),
             )
             dummy_indices = torch.zeros(
                 capacity,
@@ -1242,19 +1239,9 @@ class NPUModelRunner(GPUModelRunner):
             self._lmhead_tp_step_capacity_is_dynamic = True
             lmhead_tp_stamp_publish(
                 target_lm_head,
-                source="dp_sync_state.num_reqs*decode_query_len",
-                publisher="model_runner._publish_lmhead_tp_step_capacity",
+                source="dp_sync.num_reqs*decode_query_len",
+                detail=f"{num_reqs}*{self.decode_query_len}",
                 value=self._lmhead_tp_step_capacity_value,
-            )
-            lmhead_tp_cap_log(
-                "target_dyn_publish",
-                side="target",
-                rank=lmhead_tp_dp_rank(),
-                step=step,
-                source="dp_sync_state.num_reqs*decode_query_len",
-                dp_sync_num_reqs=num_reqs,
-                decode_query_len=self.decode_query_len,
-                dyn=self._lmhead_tp_step_capacity_value,
             )
         elif getattr(self, "_lmhead_tp_step_capacity_value", None) is None:
             # No DP sync and no value published yet: use the static bound.
@@ -1262,31 +1249,10 @@ class NPUModelRunner(GPUModelRunner):
             self._lmhead_tp_step_capacity_is_dynamic = False
             lmhead_tp_stamp_publish(
                 target_lm_head,
-                source="max_num_reqs*decode_query_len",
-                publisher="model_runner._publish_lmhead_tp_step_capacity",
+                source="max_num_seqs*decode_query_len",
+                detail=f"{self.max_num_reqs}*{self.decode_query_len}",
                 value=self._lmhead_tp_step_capacity_value,
                 dynamic=False,
-            )
-            lmhead_tp_cap_log(
-                "target_static_fallback",
-                side="target",
-                rank=lmhead_tp_dp_rank(),
-                step=step,
-                source="max_num_reqs*decode_query_len",
-                max_num_reqs=self.max_num_reqs,
-                decode_query_len=self.decode_query_len,
-                static=self._lmhead_tp_step_capacity_value,
-                reason="no_dp_sync_no_prior_value",
-            )
-        else:
-            lmhead_tp_cap_log(
-                "target_dyn_keep",
-                side="target",
-                rank=lmhead_tp_dp_rank(),
-                step=step,
-                kept=self._lmhead_tp_step_capacity_value,
-                dynamic=getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False),
-                reason="no_fresh_dp_sync",
             )
         # Otherwise keep the previously published dynamic value.
 
@@ -1301,15 +1267,12 @@ class NPUModelRunner(GPUModelRunner):
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_step_capacity()
-        lmhead_tp_cap_log(
-            "target_consume_sample",
-            side="target",
-            rank=lmhead_tp_dp_rank(),
-            step=lmhead_tp_cap_step(),
-            capacity=capacity,
-            source="dynamic" if getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False) else "static",
-            rows=num_logits,
-            pad=capacity - num_logits,
+        lmhead_tp_stamp_publish(
+            getattr(self.model, "lm_head", None),
+            source="sample.pad",
+            detail=f"{num_logits}->{capacity}",
+            value=capacity,
+            dynamic=getattr(self, "_lmhead_tp_step_capacity_is_dynamic", False),
         )
         # V1-style index pad: pad a private copy of the indices (input_batch keeps
         # the real ones; the V2 sampler gathers penalties by them) so one gather

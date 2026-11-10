@@ -47,7 +47,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import lmhead_tp_cap_log, lmhead_tp_cap_step, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -283,14 +283,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self._lmhead_tp_uniform_num_reqs = (
             None if self.pcp_manager is not None or dp_sync_state is None else getattr(dp_sync_state, "num_reqs", None)
         )
-        lmhead_tp_cap_log(
-            "stash_num_reqs",
-            family=type(self).__name__,
-            step=lmhead_tp_cap_step(),
-            source="dp_sync_state.num_reqs" if dp_sync_state is not None else "none",
-            pcp=self.pcp_manager is not None,
-            stashed=self._lmhead_tp_uniform_num_reqs,
-        )
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
@@ -395,12 +387,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # capacity publish falls back to the raw synced max / static
         # bound, exactly as before.
         self._lmhead_tp_uniform_num_reqs = None
-        lmhead_tp_cap_log(
-            "stash_cleared",
-            family=type(self).__name__,
-            step=lmhead_tp_cap_step(),
-            reason="aclgraph_capture_no_propose_round",
-        )
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
