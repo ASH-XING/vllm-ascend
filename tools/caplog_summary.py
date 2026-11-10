@@ -231,13 +231,18 @@ def chain_check(records: list[tuple[str, str, dict[str, str]]]) -> None:
     - pad must equal cap - rows, and rows must never exceed cap;
     - draft: cap must equal dyn when a dynamic value is published, else the
       static bound;
-    - target: rows must equal cap when a capacity was published (the runner
-      index/graph-pads target rows to exactly that value).
+    - pub must equal step: healthy decode republishes every step, so a
+      consume whose capacity was published at an earlier step means a
+      keep-branch consume, a load-time static stamp, or a skipped publish;
+    - target rows != cap is reported as info only: prefill / prompt-logprob
+      consumes feed the real row count, only decode consumes are
+      index-padded to cap.
     """
     bad_pad: list[tuple[str, str, object, object]] = []
     bad_rows: list[tuple[str, str, object, object]] = []
     bad_draft: list[tuple[str, str, object, object]] = []
     info_target: list[tuple[str, str, object]] = []
+    stale: list[tuple[str, str, object, object]] = []
 
     for rank, tag, fields in records:
         if tag not in ("head", "head_consume"):
@@ -248,6 +253,14 @@ def chain_check(records: list[tuple[str, str, dict[str, str]]]) -> None:
         pad = int_or_none(fields.get("pad"))
         dyn = int_or_none(fields.get("dyn"))
         static = int_or_none(fields.get("static"))
+        pub = int_or_none(fields.get("pub"))
+        step = int_or_none(fields.get("step"))
+        if pub is not None and step is not None and pub != step:
+            # The consumed capacity was published at a different step: a
+            # keep-branch consume (no fresh DP sync), a load-time static
+            # stamp, or a skipped publish. Healthy decode always has
+            # pub == step.
+            stale.append((rank, f"src={fields.get('src', '?')}", pub, step))
         if cap is not None and pad is not None and pad != cap - rows:
             bad_pad.append((rank, "pad!=cap-rows", pad, None if rows is None else cap - rows))
         if cap is not None and rows is not None and rows > cap:
@@ -284,6 +297,12 @@ def chain_check(records: list[tuple[str, str, dict[str, str]]]) -> None:
             print(f"    rank {rank} {what} src={src}")
     else:
         print("  target rows != cap: 0 (clean)")
+    if stale:
+        print(f"  pub != step (stale/kept capacity): {len(stale)} (healthy decode expects 0)")
+        for rank, what, pub, step in stale[:10]:
+            print(f"    rank {rank} published at step {pub}, consumed at step {step} {what}")
+    else:
+        print("  pub != step (stale/kept capacity): 0 (clean)")
 
 
 def main() -> None:
