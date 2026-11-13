@@ -256,9 +256,7 @@ def test_prefill_forwards_skip_sample_on_main(skip_sample):
     attn_metadata = {"draft": draft_metadata}
     speculator.draft_attn_layer_names = {"draft"}
 
-    with patch.object(
-        TargetDependentARSpeculator, "_prefill", side_effect=lambda *args: None
-    ) as parent_prefill:
+    with patch.object(TargetDependentARSpeculator, "_prefill", side_effect=lambda *args: None) as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=skip_sample)
     expected_args = [2, 4, attn_metadata, None, None, CUDAGraphMode.NONE, None]
     expected_args.append(skip_sample)
@@ -782,9 +780,7 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
 def test_generate_draft_forwards_upstream_call_contract(num_reqs, num_tokens):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
 
-    with patch.object(
-        TargetDependentARSpeculator, "_generate_draft", side_effect=lambda *args: None
-    ) as generate:
+    with patch.object(TargetDependentARSpeculator, "_generate_draft", side_effect=lambda *args: None) as generate:
         speculator._generate_draft(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
     expected.append(None)

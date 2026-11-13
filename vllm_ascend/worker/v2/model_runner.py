@@ -725,11 +725,7 @@ class NPUModelRunner(GPUModelRunner):
         if is_profile and not getattr(self, "_lmhead_tp_seen_profile", False):
             self._lmhead_tp_seen_profile = True
             lmhead_tp_cap_log("phase_mark", phase="profile_run")
-        if (
-            not dummy_run
-            and not is_profile
-            and not getattr(self, "_lmhead_tp_seen_serving", False)
-        ):
+        if not dummy_run and not is_profile and not getattr(self, "_lmhead_tp_seen_serving", False):
             self._lmhead_tp_seen_serving = True
             lmhead_tp_cap_log("phase_mark", phase="serving_start")
         self._publish_lmhead_tp_step_capacity()

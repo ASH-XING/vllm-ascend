@@ -30,9 +30,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-LINE_RE = re.compile(
-    r"\((Worker_DP(\d+)_EP\d+|APIServer)[^)]*\)[^\n]*LMHEAD_TP_CAP\|([^|]+)\|(.*)$"
-)
+LINE_RE = re.compile(r"\((Worker_DP(\d+)_EP\d+|APIServer)[^)]*\)[^\n]*LMHEAD_TP_CAP\|([^|]+)\|(.*)$")
 
 
 def parse_fields(payload: str) -> dict[str, str]:
@@ -75,9 +73,7 @@ def side_of(fields: dict[str, str]) -> str:
     return "untagged"
 
 
-def step_timeline(
-    records: list[tuple[str, str, dict[str, str]]], rank: str, lo: int | None, hi: int | None
-) -> None:
+def step_timeline(records: list[tuple[str, str, dict[str, str]]], rank: str, lo: int | None, hi: int | None) -> None:
     by_step: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
     no_step: list[tuple[str, dict[str, str]]] = []
     for rec_rank, tag, fields in records:
@@ -130,9 +126,7 @@ def summary(records: list[tuple[str, str, dict[str, str]]]) -> None:
     print(f"  ranks: {dict(sorted(ranks.items(), key=lambda kv: kv[0]))}")
     print(f"  tags: {dict(tags)}")
 
-    phases = [
-        f"rank {rank}: {fields.get('phase')}" for rank, tag, fields in records if tag == "phase_mark"
-    ]
+    phases = [f"rank {rank}: {fields.get('phase')}" for rank, tag, fields in records if tag == "phase_mark"]
     if phases:
         print("== phase marks ==")
         for phase in phases:
