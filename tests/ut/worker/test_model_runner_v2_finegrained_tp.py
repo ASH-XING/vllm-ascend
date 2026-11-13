@@ -428,7 +428,6 @@ def _make_speculator(max_num_reqs=8, num_speculative_steps=1):
     spec = object.__new__(_ConcreteSpeculator)
     spec.max_num_reqs = max_num_reqs
     spec.num_speculative_steps = num_speculative_steps
-    spec.replicated_pcp = False
     spec.model = MagicMock()
     spec.use_local_argmax_reduction = False
     spec.enable_adaptive_verification = False  # parent __init__ fields
@@ -607,7 +606,6 @@ def test_dspark_run_model_publishes_draft_capacity(_lmhead_tp_enable):
     spec = object.__new__(AscendDSparkSpeculator)
     spec.num_query_per_req = 4  # sample_from_anchor=False layout
     spec.num_speculative_steps = 4
-    spec.replicated_pcp = False
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
@@ -1035,6 +1033,7 @@ def test_propose_stashes_dp_agreed_request_count():
     must leave the stash unset for replicated drafts (global-token syncs)
     and sync-less rounds, whose publish keeps the raw-sync behavior."""
     spec = _make_speculator()
+    spec.pcp_manager = None
     spec._lmhead_tp_uniform_num_reqs = None
     propose_args = ("batch",) + (None,) * 10  # through seeds
     super_patch = _patch_super_method(AscendTargetDependentARSpeculator, "propose")
@@ -1042,7 +1041,6 @@ def test_propose_stashes_dp_agreed_request_count():
     def _run_propose(dp_sync):
         with (
             super_patch as super_propose,
-            _patch_ar_context("disable_target_pcp_for_replicated_draft"),
             _patch_ar_context("build_attn_metadata_wrapper"),
             _patch_ar_context("torch_gather_wrapper"),
         ):
@@ -1054,13 +1052,15 @@ def test_propose_stashes_dp_agreed_request_count():
     assert spec.input_batch == "batch"
     assert spec._lmhead_tp_uniform_num_reqs == 4
 
-    # Replicated drafts sync global tokens: no stash.
-    spec.replicated_pcp = True
+    # Replicated drafts sync global tokens: no stash. PCP drafts carry a
+    # PCPManager on main's refactored base.
+    spec.pcp_manager = object()
+    spec._get_pcp_draft_prefill_metadata = lambda metadata: metadata
     _run_propose(SimpleNamespace(num_reqs=4))
     assert spec._lmhead_tp_uniform_num_reqs is None
 
     # No DP sync this round: no stash.
-    spec.replicated_pcp = False
+    spec.pcp_manager = None
     _run_propose(None)
     assert spec._lmhead_tp_uniform_num_reqs is None
 
@@ -1078,14 +1078,14 @@ def test_capture_clears_stashed_request_count():
     spec.model_state = MagicMock()
     spec.target_input_buffers = MagicMock()
     spec.block_tables = MagicMock()
-    # draft_prefill_attn_groups is a read-only property resolving to
-    # target_attn_groups when replicated_pcp is False.
+    # The rebased capture forwards target_attn_groups and the PCP manager
+    # to the prefill graph capture.
     spec.target_attn_groups = MagicMock()
+    spec.pcp_manager = None
     spec.kv_cache_config = MagicMock()
     spec._lmhead_tp_uniform_num_reqs = 4  # stale from the last dummy run
 
     with (
-        _patch_ar_context("disable_target_pcp_for_replicated_draft"),
         _patch_ar_context("build_attn_metadata_wrapper"),
     ):
         spec.capture()

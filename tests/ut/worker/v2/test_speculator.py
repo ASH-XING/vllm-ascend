@@ -250,29 +250,19 @@ def test_prefill_filters_target_only_metadata():
 
 @pytest.mark.parametrize("skip_sample", [False, True])
 def test_prefill_forwards_skip_sample_on_main(skip_sample):
-    """Preserve upstream prefill arguments inside the LMHead padding scope."""
+    """Preserve upstream prefill arguments through the draft-layer filter."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.method = "mtp"
-    speculator.max_num_reqs = 8
-    speculator.num_speculative_steps = 3
-    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
     draft_metadata = object()
     attn_metadata = {"draft": draft_metadata}
     speculator.draft_attn_layer_names = {"draft"}
 
-    def parent(*args):
-        assert speculator._lmhead_pad_size == 2
-
-    module = "vllm_ascend.worker.v2.spec_decode."
-    with (
-        patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, "_prefill", side_effect=parent) as parent_prefill,
-    ):
+    with patch.object(
+        TargetDependentARSpeculator, "_prefill", side_effect=lambda *args: None
+    ) as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=skip_sample)
     expected_args = [2, 4, attn_metadata, None, None, CUDAGraphMode.NONE, None]
     expected_args.append(skip_sample)
     parent_prefill.assert_called_once_with(*expected_args)
-    assert speculator._lmhead_pad_size is None
 
 
 def test_build_uniform_attn_metadata_sets_decode_only():
@@ -789,23 +779,13 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(1, 4), (2, 8), (4, 16)])
-def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
+def test_generate_draft_forwards_upstream_call_contract(num_reqs, num_tokens):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.method = "mtp"
-    speculator.max_num_reqs = 8
-    speculator.num_speculative_steps = 3
-    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
 
-    def parent(*args):
-        assert speculator._lmhead_pad_size == num_reqs
-
-    module = "vllm_ascend.worker.v2.spec_decode."
-    with (
-        patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, "_generate_draft", side_effect=parent) as generate,
-    ):
+    with patch.object(
+        TargetDependentARSpeculator, "_generate_draft", side_effect=lambda *args: None
+    ) as generate:
         speculator._generate_draft(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
     expected.append(None)
     generate.assert_called_once_with(*expected)
-    assert speculator._lmhead_pad_size is None
